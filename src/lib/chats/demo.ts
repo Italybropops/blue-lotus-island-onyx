@@ -1,7 +1,7 @@
 import type { Chat, Message } from "./types";
 
-function msg(role: Message["role"], content: string, i: number): Message {
-  return { id: `m-${i}`, role, content };
+function msg(role: Message["role"], content: string, chat: string, i: number): Message {
+  return { id: `demo-${chat}-m-${i}`, role, content };
 }
 
 function chat(opts: {
@@ -17,10 +17,10 @@ function chat(opts: {
   const messages: Message[] = [];
   let i = 0;
   for (const turn of opts.turns) {
-    messages.push(msg("user", turn[0], ++i));
-    if (turn[1]) messages.push(msg("assistant", turn[1], ++i));
+    messages.push(msg("user", turn[0], opts.n, ++i));
+    if (turn[1]) messages.push(msg("assistant", turn[1], opts.n, ++i));
   }
-  if (opts.extraUser) messages.push(msg("user", opts.extraUser, ++i));
+  if (opts.extraUser) messages.push(msg("user", opts.extraUser, opts.n, ++i));
   const blob = messages
     .filter((m) => m.role === "user")
     .map((m) => m.content)

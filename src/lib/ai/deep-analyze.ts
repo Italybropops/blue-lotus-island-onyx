@@ -33,6 +33,7 @@ export const deepAnalyze = createServerFn({ method: "POST" })
     if (!input || !Array.isArray(input.chats)) {
       throw new Error("Expected { chats: CompactChat[] }");
     }
+    // External xAI only: compact payload. The SQLite archive is not truncated.
     return { chats: input.chats.slice(0, 40) };
   })
   .handler(async ({ data }): Promise<{ ok: true; analysis: AiAnalysis } | { ok: false; error: string }> => {
@@ -161,8 +162,9 @@ ${JSON.stringify(payload)}`,
 
 export const summarizeChat = createServerFn({ method: "POST" })
   .validator((input: { title: string; transcript: string }) => ({
+    // External path only — local archive stores the full transcript.
     title: String(input.title ?? "").slice(0, 200),
-    transcript: String(input.transcript ?? "").slice(0, 6000),
+    transcript: String(input.transcript ?? "").slice(0, 24_000),
   }))
   .handler(async ({ data }): Promise<{ ok: true; summary: string } | { ok: false; error: string }> => {
     const apiKey = process.env.XAI_API_KEY;

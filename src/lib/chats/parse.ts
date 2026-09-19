@@ -93,13 +93,9 @@ function toChat(partial: {
   source?: Chat["source"];
 }): Chat {
   const now = new Date().toISOString();
-  const messages = (partial.messages.length
+  const messages = partial.messages.length
     ? partial.messages
-    : [{ id: newId("m"), role: "user" as const, content: "" }]
-  ).map((m) => ({
-    ...m,
-    content: m.content.length > 12_000 ? `${m.content.slice(0, 12_000)}\n…[truncated]` : m.content,
-  }));
+    : [{ id: newId("m"), role: "user" as const, content: "" }];
   return {
     id: newId("c"),
     title: partial.title?.trim() || titleFrom(messages[0]?.content ?? ""),
@@ -303,7 +299,7 @@ function parseJsonChats(data: unknown): Chat[] | null {
     const key = `${chat.title}::${chat.messages.map((m) => m.content.slice(0, 40)).join("|")}`.slice(0, 240);
     if (!unique.has(key)) unique.set(key, chat);
   }
-  const chats = [...unique.values()].slice(0, 500);
+  const chats = [...unique.values()].slice(0, 10_000);
   return chats.length ? chats : null;
 }
 
@@ -425,7 +421,7 @@ function parseJsonLines(text: string): Chat[] {
       // skip
     }
   }
-  return chats.slice(0, 500);
+  return chats.slice(0, 10_000);
 }
 
 export function userText(chat: Chat): string {

@@ -38,6 +38,9 @@ export interface Chat {
   archived: boolean;
   summary: string;
   mergedFrom?: string[];
+  contentSha256?: string;
+  provider?: string;
+  sourceId?: string;
 }
 
 export interface DuplicateGroup {
@@ -46,6 +49,7 @@ export interface DuplicateGroup {
   score: number;
   reason: string;
   keepId: string;
+  kind?: "exact" | "near";
 }
 
 export interface MergeSuggestion {

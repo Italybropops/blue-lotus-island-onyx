@@ -104,7 +104,7 @@ export function CleanupView() {
 
       <Tabs value={cleanupTab} onValueChange={(v) => setCleanupTab(v as CleanupTab)}>
         <TabsList className="w-full justify-start overflow-x-auto">
-          <TabsTrigger value="delete">Delete</TabsTrigger>
+          <TabsTrigger value="delete">Hide</TabsTrigger>
           <TabsTrigger value="merge">Merge</TabsTrigger>
           <TabsTrigger value="organize">Organize</TabsTrigger>
           <TabsTrigger value="grok">Do this in Grok</TabsTrigger>
@@ -180,7 +180,7 @@ export function CleanupView() {
               );
             })}
             {!deletes.length && !extraDeletes.length && (
-              <li className="text-sm text-muted-foreground">No delete suggestions. Lucky you.</li>
+              <li className="text-sm text-muted-foreground">No hide suggestions. Lucky you.</li>
             )}
           </ul>
           <Button className="mt-4" onClick={applyDeletes}>

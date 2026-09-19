@@ -232,6 +232,35 @@ export function analyzeChats(chats: Chat[]): Analysis {
   const active = chats.filter((c) => c.status === "active");
   const clutterIds = active.filter(isClutter).map((c) => c.id);
 
+  const byId = new Map(active.map((c) => [c.id, c]));
+
+  const exactMap = new Map<string, string[]>();
+  for (const c of active) {
+    const key =
+      c.contentSha256 ||
+      c.messages.map((m) => `${m.role}\n${m.content.replace(/\r\n/g, "\n").trim()}`).join("\n\u001e\n");
+    if (!key) continue;
+    const list = exactMap.get(key) ?? [];
+    list.push(c.id);
+    exactMap.set(key, list);
+  }
+  const exactGroups: DuplicateGroup[] = [];
+  let exactI = 0;
+  const exactCovered = new Set<string>();
+  for (const ids of exactMap.values()) {
+    if (ids.length < 2) continue;
+    const ranked = [...ids].sort((x, y) => charCount(byId.get(y)!) - charCount(byId.get(x)!));
+    exactGroups.push({
+      id: `exact-${++exactI}`,
+      chatIds: ranked,
+      score: 1,
+      keepId: ranked[0],
+      kind: "exact",
+      reason: `Exact duplicate (${ranked.length} copies of the same text). Both records stay in the archive; hide extras if you want a cleaner list.`,
+    });
+    ranked.forEach((id) => exactCovered.add(id));
+  }
+
   const vecs = new Map<string, Map<string, number>>();
   const titleToks = new Map<string, string[]>();
   for (const c of active) {
@@ -246,6 +275,7 @@ export function analyzeChats(chats: Chat[]): Analysis {
     for (let j = i + 1; j < active.length; j++) {
       const a = active[i];
       const b = active[j];
+      if (exactCovered.has(a.id) && exactCovered.has(b.id)) continue;
       const cos = cosine(vecs.get(a.id)!, vecs.get(b.id)!);
       const jac = jaccard(titleToks.get(a.id)!, titleToks.get(b.id)!);
       const score = cos * 0.72 + jac * 0.28;
@@ -256,8 +286,7 @@ export function analyzeChats(chats: Chat[]): Analysis {
     }
   }
 
-  const byId = new Map(active.map((c) => [c.id, c]));
-  const dupGroups: DuplicateGroup[] = unionFind(dupPairs).map((chatIds, i) => {
+  const nearGroups: DuplicateGroup[] = unionFind(dupPairs).map((chatIds, i) => {
     const ranked = [...chatIds].sort((x, y) => charCount(byId.get(y)!) - charCount(byId.get(x)!));
     const keepId = ranked[0];
     const avg =
@@ -269,9 +298,12 @@ export function analyzeChats(chats: Chat[]): Analysis {
       chatIds: ranked,
       score: avg,
       keepId,
-      reason: `Nearly the same question across ${ranked.length} chats. Keep the longest thread and drop the rest.`,
+      kind: "near" as const,
+      reason: `Nearly the same question across ${ranked.length} chats. Keep the longest thread; extras can be hidden, not erased.`,
     };
   });
+
+  const dupGroups: DuplicateGroup[] = [...exactGroups, ...nearGroups];
 
   const covered = new Set(dupGroups.flatMap((g) => g.chatIds));
   const mergeSuggestions: MergeSuggestion[] = [];

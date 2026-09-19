@@ -45,3 +45,15 @@ export function downloadText(filename: string, text: string, type = "text/plain"
   a.click();
   URL.revokeObjectURL(url);
 }
+
+export function downloadBytes(filename: string, bytes: Uint8Array, type = "application/octet-stream"): void {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const blob = new Blob([copy], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

@@ -1,4 +1,4 @@
-import { FolderOpen, Layers, Library, Upload } from "lucide-react";
+import { FolderOpen, Layers, Library, Settings, Upload } from "lucide-react";
 import type { ReactNode } from "react";
 import { activeChats, useChatStore, type AppView } from "@/lib/chats/store";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,11 @@ const NAV: { id: AppView; label: string; icon: typeof Library }[] = [
   { id: "library", label: "Library", icon: Library },
   { id: "cleanup", label: "Cleanup", icon: FolderOpen },
   { id: "import", label: "Import", icon: Upload },
+];
+
+const DESKTOP_NAV: { id: AppView; label: string; icon: typeof Library }[] = [
+  ...NAV,
+  { id: "settings", label: "Archive", icon: Settings },
 ];
 
 export function Wordmark({ className }: { className?: string }) {
@@ -44,9 +49,9 @@ export function AppShell({
     <div className="flex min-h-dvh flex-col overflow-x-hidden bg-background text-foreground lg:flex-row">
       <aside className="hidden w-56 shrink-0 flex-col border-r border-border px-4 py-6 lg:flex">
         <Wordmark />
-        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Your Grok chats, sorted.</p>
+        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">Your chats, sorted — locally.</p>
         <nav className="mt-8 flex flex-col gap-1" aria-label="Main">
-          {NAV.map((item) => {
+          {DESKTOP_NAV.map((item) => {
             const Icon = item.icon;
             const active = view === item.id;
             const badge = item.id === "cleanup" && deleteCount > 0 ? deleteCount : item.id === "library" ? activeCount : 0;
@@ -62,7 +67,7 @@ export function AppShell({
               >
                 <Icon className="size-4" strokeWidth={1.75} />
                 {item.label}
-                {badge > 0 && item.id !== "insights" && item.id !== "import" && (
+                {badge > 0 && item.id !== "insights" && item.id !== "import" && item.id !== "settings" && (
                   <span className="ml-auto text-xs tabular-nums text-subtle">{badge}</span>
                 )}
               </button>
@@ -70,7 +75,8 @@ export function AppShell({
           })}
         </nav>
         <p className="mt-auto pt-8 text-xs leading-relaxed text-subtle">
-          Sift keeps a local copy. It cannot delete chats on grok.com — it writes the plan you run there.
+          Conversations live in a SQLite archive in this browser. Hide and merge are reversible. Sift cannot delete
+          chats on grok.com.
         </p>
       </aside>
 
@@ -81,14 +87,27 @@ export function AppShell({
           </div>
           <div className="hidden min-w-0 lg:block">
             <p className="text-xs tracking-wide text-muted-foreground uppercase">
-              {NAV.find((n) => n.id === view)?.label}
+              {view === "settings" ? "Archive" : NAV.find((n) => n.id === view)?.label}
             </p>
           </div>
-          <div className="flex items-center gap-2">{actions}</div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setView("settings")}
+              className={cn(
+                "inline-flex size-11 items-center justify-center rounded-md lg:hidden",
+                view === "settings" ? "bg-accent text-foreground" : "text-muted-foreground",
+              )}
+              aria-label="Archive and settings"
+            >
+              <Settings className="size-4" strokeWidth={1.75} />
+            </button>
+            {actions}
+          </div>
         </header>
         {usingDemo && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-card px-4 py-2.5 text-sm text-muted-foreground lg:px-8">
-            <span>Sample Grok library so you can try analysis now. Import your own chats to replace it.</span>
+            <span>Sample library so you can try analysis now. Import your own chats to replace the view — the sample stays in the archive.</span>
             <button
               type="button"
               onClick={() => setView("import")}

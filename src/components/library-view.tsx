@@ -195,12 +195,15 @@ function ChatDetail({ chat, onClose }: { chat: Chat; onClose: () => void }) {
   }
 
   async function runSummary() {
+    const ok = window.confirm(
+      "This optional summary sends this chat’s text to xAI (off-device). Local analysis does not need that. Continue?",
+    );
+    if (!ok) return;
     setSummarizing(true);
     try {
       const transcript = chat.messages
-        .map((m) => `${m.role === "user" ? "You" : "Grok"}: ${m.content}`)
-        .join("\n\n")
-        .slice(0, 6000);
+        .map((m) => `${m.role === "user" ? "You" : "Assistant"}: ${m.content}`)
+        .join("\n\n");
       const result = await summarizeChat({ data: { title: chat.title, transcript } });
       if (!result.ok) {
         toast.error(result.error);

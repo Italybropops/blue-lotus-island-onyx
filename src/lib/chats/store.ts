@@ -5,8 +5,21 @@ import { DEMO_CHATS } from "./demo";
 import { newId } from "./parse";
 import { bucketFor } from "./triage";
 import type { AiAnalysis, Analysis, Category, Chat, CleanupTab, TriageBucket } from "./types";
+import type { ImportBundle } from "@/lib/sift/types";
+import { chatsToCanonical } from "@/lib/sift/providers/canonical";
+import { addRelationship, insertImport, setSetting, updateConversation } from "@/lib/sift/repo";
+import { persistNow } from "@/lib/sift/sqlite";
+import { loadVisibleLibrary, openArchive } from "@/lib/sift/hydrate";
+import { statusToState } from "@/lib/sift/view";
 
-export type AppView = "library" | "insights" | "cleanup" | "import";
+export type AppView = "library" | "insights" | "cleanup" | "import" | "settings";
+
+export interface ImportReport {
+  inserted: number;
+  exactDuplicates: number;
+  warnings: string[];
+  replacedArchive: boolean;
+}
 
 interface ChatState {
   chats: Chat[];
@@ -22,6 +35,8 @@ interface ChatState {
   grokChecks: Record<string, boolean>;
   triage: Record<string, TriageBucket>;
   hydrated: boolean;
+  archiveError: string | null;
+  lastImport: ImportReport | null;
   setHydrated: (v: boolean) => void;
   setView: (view: AppView) => void;
   setQuery: (query: string) => void;
@@ -30,7 +45,9 @@ interface ChatState {
   setCleanupTab: (tab: CleanupTab) => void;
   select: (id: string | null) => void;
   refreshAnalysis: () => void;
+  reloadFromArchive: () => Promise<void>;
   importChats: (incoming: Chat[], mode: "append" | "replace") => void;
+  importBundles: (bundles: ImportBundle[], mode: "append" | "replace") => Promise<ImportReport>;
   loadDemo: () => void;
   clearLibrary: () => void;
   removeChats: (ids: string[]) => void;
@@ -64,6 +81,16 @@ function withAnalysis(chats: Chat[]): Pick<ChatState, "chats" | "analysis"> {
   return { chats: next, analysis: analyzeChats(next) };
 }
 
+function writeState(chat: Chat): void {
+  void updateConversation(chat.id, {
+    title: chat.title,
+    category: chat.category,
+    pinned: chat.pinned,
+    state: statusToState(chat),
+    summary: chat.summary,
+  });
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -80,6 +107,8 @@ export const useChatStore = create<ChatState>()(
       grokChecks: {},
       triage: {},
       hydrated: false,
+      archiveError: null,
+      lastImport: null,
       setHydrated: (v) => set({ hydrated: v }),
       setView: (view) => set({ view }),
       setQuery: (query) => set({ query }),
@@ -88,43 +117,139 @@ export const useChatStore = create<ChatState>()(
       setCleanupTab: (cleanupTab) => set({ cleanupTab }),
       select: (selectedId) => set({ selectedId }),
       refreshAnalysis: () => set(withAnalysis(get().chats)),
+      reloadFromArchive: async () => {
+        const loaded = await loadVisibleLibrary();
+        set({
+          ...withAnalysis(loaded.chats),
+          usingDemo: loaded.usingDemo,
+          selectedId: loaded.chats.find((c) => c.id === get().selectedId)?.id ?? loaded.chats[0]?.id ?? null,
+        });
+      },
       importChats: (incoming, mode) => {
         if (!incoming.length) return;
-        const categorized = applyInferredCategories(incoming.map(normalize));
-        const existing = get().usingDemo ? [] : get().chats;
-        const next = mode === "replace" ? categorized : [...categorized, ...existing];
+        void get().importBundles(
+          [
+            {
+              provider: "generic",
+              label: "Pasted text",
+              conversations: chatsToCanonical(incoming, "pending", "generic"),
+              warnings: [],
+            },
+          ],
+          mode,
+        );
+      },
+      importBundles: async (bundles, mode) => {
+        const replacedArchive = bundles.some((b) => b.provider === "sift" && b.warnings.some((w) => /Replaced the local SQLite/.test(w)));
+        if (!replacedArchive) {
+          if (mode === "replace" && !get().usingDemo) {
+            for (const chat of get().chats.filter((c) => c.status === "active")) {
+              await updateConversation(chat.id, { state: "archived" });
+            }
+          }
+          await setSetting("usingDemo", false);
+          let inserted = 0;
+          let exactDuplicates = 0;
+          const warnings: string[] = [];
+          for (const bundle of bundles) {
+            warnings.push(...bundle.warnings);
+            if (!bundle.conversations.length) continue;
+            const result = await insertImport(bundle);
+            inserted += result.inserted;
+            exactDuplicates += result.exactDuplicateLinks;
+          }
+          await persistNow();
+          const loaded = await loadVisibleLibrary();
+          const report: ImportReport = { inserted, exactDuplicates, warnings, replacedArchive: false };
         set({
-          ...withAnalysis(next),
+          ...withAnalysis(loaded.chats),
           usingDemo: false,
-          selectedId: categorized[0]?.id ?? null,
+          selectedId: loaded.chats[0]?.id ?? null,
           view: "insights",
           aiAnalysis: null,
           triage: mode === "replace" ? {} : get().triage,
+          lastImport: report,
+          archiveError: null,
         });
-      },
-      loadDemo: () =>
+          return report;
+        }
+        await setSetting("usingDemo", false);
+        await persistNow();
+        const loaded = await loadVisibleLibrary();
+        const report: ImportReport = {
+          inserted: loaded.chats.length,
+          exactDuplicates: 0,
+          warnings: bundles.flatMap((b) => b.warnings),
+          replacedArchive: true,
+        };
         set({
-          ...withAnalysis(DEMO_CHATS),
-          usingDemo: true,
-          selectedId: DEMO_CHATS[0]?.id ?? null,
+          ...withAnalysis(loaded.chats),
+          usingDemo: false,
+          selectedId: loaded.chats[0]?.id ?? null,
           view: "insights",
-          aiAnalysis: null,
-          grokChecks: {},
-          triage: {},
-        }),
-      clearLibrary: () =>
+          lastImport: report,
+        });
+        return report;
+      },
+      loadDemo: () => {
+        void (async () => {
+          await setSetting("usingDemo", true);
+          const loaded = await loadVisibleLibrary();
+          if (!loaded.chats.length) {
+            await insertImport({
+              provider: "demo",
+              label: "Sample library",
+              conversations: chatsToCanonical(DEMO_CHATS, "pending", "demo"),
+              warnings: [],
+            });
+            await persistNow();
+            const again = await loadVisibleLibrary();
+            set({
+              ...withAnalysis(again.chats),
+              usingDemo: true,
+              selectedId: again.chats[0]?.id ?? null,
+              view: "insights",
+              aiAnalysis: null,
+              grokChecks: {},
+              triage: {},
+            });
+            return;
+          }
+          set({
+            ...withAnalysis(loaded.chats),
+            usingDemo: true,
+            selectedId: loaded.chats[0]?.id ?? null,
+            view: "insights",
+            aiAnalysis: null,
+            grokChecks: {},
+            triage: {},
+          });
+        })();
+      },
+      clearLibrary: () => {
+        const chats = get().chats;
+        for (const chat of chats) {
+          if (chat.status === "active") writeState({ ...chat, status: "removed", archived: false });
+        }
+        void setSetting("usingDemo", false);
         set({
-          chats: [],
-          analysis: analyzeChats([]),
+          chats: chats.map((c) => (c.status === "active" ? { ...c, status: "removed" as const } : c)),
+          analysis: analyzeChats(chats.map((c) => (c.status === "active" ? { ...c, status: "removed" as const } : c))),
           usingDemo: false,
           selectedId: null,
           aiAnalysis: null,
           grokChecks: {},
           triage: {},
-        }),
+        });
+      },
       removeChats: (ids) => {
         const setIds = new Set(ids);
-        const chats = get().chats.map((c) => (setIds.has(c.id) ? { ...c, status: "removed" as const } : c));
+        const chats = get().chats.map((c) => {
+          if (!setIds.has(c.id)) return c;
+          const next = { ...c, status: "removed" as const };
+          writeState(next);
+          return next;
+        });
         const selectedId = setIds.has(get().selectedId ?? "")
           ? (chats.find((c) => c.status === "active")?.id ?? null)
           : get().selectedId;
@@ -133,9 +258,12 @@ export const useChatStore = create<ChatState>()(
         set({ ...withAnalysis(chats), selectedId, triage });
       },
       restoreChat: (id) => {
-        const chats = get().chats.map((c) =>
-          c.id === id && c.status === "removed" ? { ...c, status: "active" as const } : c,
-        );
+        const chats = get().chats.map((c) => {
+          if (c.id !== id || c.status !== "removed") return c;
+          const next = { ...c, status: "active" as const, archived: false };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       mergeChats: (ids, title) => {
@@ -156,48 +284,82 @@ export const useChatStore = create<ChatState>()(
           category: sources[0].category,
           pinned: sources.some((c) => c.pinned),
           archived: false,
-          summary: sources
-            .map((c) => c.summary)
-            .join(" · ")
-            .slice(0, 220),
+          summary: sources.map((c) => c.summary).filter(Boolean).join(" · "),
           mergedFrom: sources.map((c) => c.id),
         };
         const chats = [merged, ...get().chats.map((c) => (setIds.has(c.id) ? { ...c, status: "merged" as const } : c))];
         const triage = { ...get().triage };
         for (const id of ids) delete triage[id];
         set({ ...withAnalysis(chats), selectedId: merged.id, view: "library", triage });
+        void (async () => {
+          for (const src of sources) {
+            await updateConversation(src.id, { state: "merged" });
+            await addRelationship({
+              kind: "merged_from",
+              fromId: merged.id,
+              toId: src.id,
+              reason: "User merged these threads. Originals are kept as merged.",
+            });
+          }
+          await insertImport({
+            provider: "sift",
+            label: "Merged conversation",
+            conversations: chatsToCanonical([merged], "pending", "sift"),
+            warnings: [],
+          });
+          await persistNow();
+        })();
       },
       recategorize: (id, category) => {
-        const chats = get().chats.map((c) => (c.id === id ? { ...c, category } : c));
+        const chats = get().chats.map((c) => {
+          if (c.id !== id) return c;
+          const next = { ...c, category };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       togglePin: (id) => {
-        const chats = get().chats.map((c) =>
-          c.id === id ? { ...c, pinned: !c.pinned, archived: c.pinned ? c.archived : false } : c,
-        );
+        const chats = get().chats.map((c) => {
+          if (c.id !== id) return c;
+          const next = { ...c, pinned: !c.pinned, archived: c.pinned ? c.archived : false };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       pinWorkingSet: () => {
         const ids = new Set(get().analysis?.workingSetIds ?? []);
         if (!ids.size) return;
-        const chats = get().chats.map((c) => (ids.has(c.id) ? { ...c, pinned: true, archived: false } : c));
+        const chats = get().chats.map((c) => {
+          if (!ids.has(c.id)) return c;
+          const next = { ...c, pinned: true, archived: false };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       setArchived: (ids, archived) => {
         const setIds = new Set(ids);
-        const chats = get().chats.map((c) =>
-          setIds.has(c.id) ? { ...c, archived, pinned: archived ? false : c.pinned } : c,
-        );
+        const chats = get().chats.map((c) => {
+          if (!setIds.has(c.id)) return c;
+          const next = { ...c, archived, pinned: archived ? false : c.pinned };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       applyRenames: (ids) => {
         const suggestions = get().analysis?.renameSuggestions ?? [];
         const want = ids ? new Set(ids) : new Set(suggestions.map((s) => s.chatId));
-        const map = new Map(
-          suggestions.filter((s) => want.has(s.chatId)).map((s) => [s.chatId, s.suggested] as const),
-        );
+        const map = new Map(suggestions.filter((s) => want.has(s.chatId)).map((s) => [s.chatId, s.suggested] as const));
         if (!map.size) return;
-        const chats = get().chats.map((c) => (map.has(c.id) ? { ...c, title: map.get(c.id)! } : c));
+        const chats = get().chats.map((c) => {
+          if (!map.has(c.id)) return c;
+          const next = { ...c, title: map.get(c.id)! };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       setAiAnalysis: (aiAnalysis) => set({ aiAnalysis }),
@@ -206,15 +368,24 @@ export const useChatStore = create<ChatState>()(
         if (!ai) return;
         const sum = new Map(ai.summaries.map((s) => [s.chatId, s.summary]));
         const cat = new Map(ai.recategorizations.map((s) => [s.chatId, s.category]));
-        const chats = get().chats.map((c) => ({
-          ...c,
-          summary: sum.get(c.id) ?? c.summary,
-          category: cat.get(c.id) ?? c.category,
-        }));
+        const chats = get().chats.map((c) => {
+          const next = {
+            ...c,
+            summary: sum.get(c.id) ?? c.summary,
+            category: cat.get(c.id) ?? c.category,
+          };
+          if (next.summary !== c.summary || next.category !== c.category) writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       patchSummary: (id, summary) => {
-        const chats = get().chats.map((c) => (c.id === id ? { ...c, summary } : c));
+        const chats = get().chats.map((c) => {
+          if (c.id !== id) return c;
+          const next = { ...c, summary };
+          writeState(next);
+          return next;
+        });
         set(withAnalysis(chats));
       },
       toggleGrokCheck: (key) => set({ grokChecks: { ...get().grokChecks, [key]: !get().grokChecks[key] } }),
@@ -224,9 +395,14 @@ export const useChatStore = create<ChatState>()(
         const next = chats.map((c) => {
           if (c.status !== "active") return c;
           const bucket = bucketFor(c, analysis, triage);
-          if (bucket === "drop") return { ...c, status: "removed" as const };
-          if (bucket === "keep") return { ...c, pinned: true, archived: false };
-          return { ...c, archived: true, pinned: false };
+          const updated =
+            bucket === "drop"
+              ? { ...c, status: "removed" as const }
+              : bucket === "keep"
+                ? { ...c, pinned: true, archived: false }
+                : { ...c, archived: true, pinned: false };
+          writeState(updated);
+          return updated;
         });
         const selectedId =
           next.find((c) => c.id === get().selectedId && c.status === "active")?.id ??
@@ -236,19 +412,38 @@ export const useChatStore = create<ChatState>()(
       },
     }),
     {
-      name: "sift-library-v1",
+      name: "sift-ui-v2",
       partialize: (s) => ({
-        chats: s.chats,
-        usingDemo: s.usingDemo,
         grokChecks: s.grokChecks,
-        aiAnalysis: s.aiAnalysis,
         selectedId: s.selectedId,
         triage: s.triage,
+        view: s.view === "settings" ? "insights" : s.view,
       }),
       skipHydration: true,
     },
   ),
 );
+
+export async function hydrateArchive(): Promise<void> {
+  try {
+    const loaded = await openArchive();
+    useChatStore.setState({
+      ...withAnalysis(loaded.chats),
+      usingDemo: loaded.usingDemo,
+      selectedId: loaded.chats[0]?.id ?? null,
+      hydrated: true,
+      archiveError: null,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Could not open the local SQLite archive.";
+    useChatStore.setState({
+      ...withAnalysis(DEMO_CHATS),
+      usingDemo: true,
+      hydrated: true,
+      archiveError: message,
+    });
+  }
+}
 
 export function activeChats(chats: Chat[]): Chat[] {
   return chats.filter((c) => c.status === "active");

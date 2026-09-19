@@ -49,20 +49,20 @@ export function InsightsView() {
         <h1 className="font-display mt-2 text-4xl leading-tight tracking-tight">
           {active.length === 0
             ? "Import a library to sift it."
-            : `${deletes} to delete, ${merges} to merge, ${working} to keep in Grok.`}
+            : `${deletes} to hide, ${merges} to merge, ${working} to keep in Grok.`}
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-          Local analysis runs on this device: summaries, topics, repeats, clutter. Ask Grok for a deeper pass when
-          you want rewritten summaries and a sharper hybrid plan — a small working set in the Grok sidebar, the rest
-          archived here.
+          Local analysis runs on this device: summaries, topics, repeats, clutter. External AI is optional and
+          off-device — confirm in the header if you want rewritten summaries. Keep a short working set in Grok; park
+          the rest in this archive.
         </p>
       </header>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <ActionCard
-          label="Delete"
+          label="Hide"
           value={deletes}
-          hint="Clutter, weaker copies, stale one-offs"
+          hint="Clutter, weaker copies, stale one-offs — reversible"
           onClick={() => openCleanup("delete")}
         />
         <ActionCard
@@ -222,8 +222,8 @@ export function InsightsView() {
         </section>
       ) : (
         <p className="text-sm text-muted-foreground">
-          Run “Ask Grok” in the header for summaries, recategorization, and a sharper hybrid plan. Local findings
-          above already cover duplicates, clutter, and the working set.
+          Local findings stay here even if you never send anything off-device. They already cover duplicates, clutter,
+          and the working set.
         </p>
       )}
     </div>

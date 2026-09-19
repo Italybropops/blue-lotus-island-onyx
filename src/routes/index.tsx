@@ -7,11 +7,19 @@ import { CleanupView } from "@/components/cleanup-view";
 import { ImportView } from "@/components/import-view";
 import { InsightsView } from "@/components/insights-view";
 import { LibraryView } from "@/components/library-view";
+import { SettingsView } from "@/components/settings-view";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { deepAnalyze, type CompactChat } from "@/lib/ai/deep-analyze";
 import { flagsFor } from "@/lib/chats/format";
 import { userText } from "@/lib/chats/parse";
-import { activeChats, useChatStore } from "@/lib/chats/store";
+import { activeChats, hydrateArchive, useChatStore } from "@/lib/chats/store";
 
 export const Route = createFileRoute("/")({ component: Home });
 
@@ -20,14 +28,12 @@ function Home() {
   const hydrated = useChatStore((s) => s.hydrated);
 
   useEffect(() => {
-    const finish = () => {
-      useChatStore.getState().setHydrated(true);
-      useChatStore.getState().refreshAnalysis();
-    };
-    const unsub = useChatStore.persist.onFinishHydration(finish);
+    const unsub = useChatStore.persist.onFinishHydration(() => undefined);
     void useChatStore.persist.rehydrate();
-    if (useChatStore.persist.hasHydrated()) finish();
-    const timeout = window.setTimeout(finish, 1600);
+    void hydrateArchive();
+    const timeout = window.setTimeout(() => {
+      if (!useChatStore.getState().hydrated) useChatStore.getState().setHydrated(true);
+    }, 4000);
     return () => {
       unsub();
       window.clearTimeout(timeout);
@@ -36,23 +42,26 @@ function Home() {
 
   if (!hydrated) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-background text-foreground">
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-3 bg-background text-foreground">
         <Wordmark />
+        <p className="text-sm text-muted-foreground">Opening local archive…</p>
       </div>
     );
   }
 
   return (
-    <AppShell actions={<AskGrokButton />}>
+    <AppShell actions={<AskExternalAiButton />}>
       {view === "insights" && <InsightsView />}
       {view === "library" && <LibraryView />}
       {view === "cleanup" && <CleanupView />}
       {view === "import" && <ImportView />}
+      {view === "settings" && <SettingsView />}
     </AppShell>
   );
 }
 
-function AskGrokButton() {
+function AskExternalAiButton() {
+  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const chats = useChatStore((s) => s.chats);
   const analysis = useChatStore((s) => s.analysis);
@@ -67,6 +76,7 @@ function AskGrokButton() {
       return;
     }
     setBusy(true);
+    setOpen(false);
     try {
       const compact: CompactChat[] = active.slice(0, 40).map((c) => ({
         id: c.id,
@@ -86,7 +96,7 @@ function AskGrokButton() {
       setAi(result.analysis);
       applyAi();
       setView("insights");
-      toast.success("Grok finished the deep pass.");
+      toast.success("External model finished. Compact excerpts were sent off-device.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Deep analysis failed.");
     } finally {
@@ -95,9 +105,28 @@ function AskGrokButton() {
   }
 
   return (
-    <Button onClick={() => void run()} disabled={busy} size="sm" aria-busy={busy}>
-      <Sparkles className="size-4" strokeWidth={1.75} />
-      {busy ? "Asking Grok…" : "Ask Grok"}
-    </Button>
+    <>
+      <Button onClick={() => setOpen(true)} disabled={busy} size="sm" aria-busy={busy} variant="outline">
+        <Sparkles className="size-4" strokeWidth={1.75} />
+        {busy ? "Asking…" : "External AI"}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Send excerpts off this device?</DialogTitle>
+            <DialogDescription>
+              Local sorting already ran here. This optional pass uses xAI (Grok). It sends titles and short excerpts
+              for at most 40 chats — not your SQLite archive, and not full long threads. Core Sift does not need this.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-6 flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" onClick={() => setOpen(false)}>
+              Stay local
+            </Button>
+            <Button onClick={() => void run()}>Send excerpts</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
