@@ -1,13 +1,13 @@
 import JSZip from "jszip";
 import { parseWithAdapters } from "@/lib/sift/providers";
 import { chatsToCanonical } from "@/lib/sift/providers/canonical";
-import { replaceSqlite } from "@/lib/sift/sqlite";
+import { PARSER_VERSION } from "@/lib/sift/parsers";
+import { peekSqliteBytes } from "@/lib/sift/sqlite";
 import type { ImportBundle } from "@/lib/sift/types";
 import { parseImport } from "./parse";
 import type { Chat, ImportMode } from "./types";
 import { toViewChat } from "@/lib/sift/view";
-
-const PREFERRED_JSON = /(prod-grok-backend|conversations|chats|grok).*\.json$/i;
+import { bundleFromText } from "@/lib/sift/providers/generic";
 
 function isZip(file: File): boolean {
   const name = file.name.toLowerCase();
@@ -23,37 +23,72 @@ function isSqlite(file: File): boolean {
   return name.endsWith(".sqlite") || name.endsWith(".db") || name.endsWith(".sqlite3");
 }
 
-async function textsFromZip(file: File): Promise<{ text: string; filename: string }[]> {
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+async function bundlesFromZip(file: File, bytes: Uint8Array, mode: ImportMode): Promise<ImportBundle[]> {
+  const zip = await JSZip.loadAsync(bytes);
   const jsonEntries = Object.values(zip.files).filter((f) => !f.dir && /\.json$/i.test(f.name));
-  const preferred = jsonEntries.filter((f) => PREFERRED_JSON.test(f.name));
-  const pick = preferred.length ? preferred : jsonEntries;
-  if (pick.length) {
-    const chunks: { text: string; filename: string }[] = [];
-    for (const entry of pick.slice(0, 12)) {
-      chunks.push({ text: await entry.async("string"), filename: entry.name });
-    }
-    return chunks;
-  }
   const textEntries = Object.values(zip.files).filter((f) => !f.dir && /\.(txt|md|markdown)$/i.test(f.name));
-  const chunks: { text: string; filename: string }[] = [];
-  for (const entry of textEntries.slice(0, 40)) {
-    chunks.push({ text: await entry.async("string"), filename: entry.name });
+  const entries = jsonEntries.length ? jsonEntries : textEntries;
+  if (!entries.length) {
+    return [
+      {
+        provider: "generic",
+        label: file.name,
+        filename: file.name,
+        mime: file.type || "application/zip",
+        conversations: [],
+        warnings: ["ZIP had no JSON or text files Sift can read."],
+        skipped: [],
+        failed: [{ reason: "Empty or unsupported ZIP" }],
+        parser: "generic",
+        parserVersion: PARSER_VERSION.generic,
+        rawBytes: bytes,
+      },
+    ];
   }
-  return chunks;
+  const merged: ImportBundle[] = [];
+  for (const entry of entries) {
+    const text = await entry.async("string");
+    if (mode === "titles" || mode === "transcripts") {
+      merged.push(
+        bundleFromText(text, {
+          provider: "generic",
+          label: `${file.name} · ${entry.name}`,
+          filename: entry.name,
+          mode,
+        }),
+      );
+    } else {
+      merged.push(parseWithAdapters(text, entry.name));
+    }
+  }
+  const conversations = merged.flatMap((b) => b.conversations);
+  const skipped = merged.flatMap((b) => b.skipped);
+  const failed = merged.flatMap((b) => b.failed);
+  const warnings = merged.flatMap((b) => b.warnings);
+  const provider = merged.find((b) => b.conversations.length)?.provider ?? "generic";
+  const parserVersion = merged.find((b) => b.conversations.length)?.parserVersion ?? PARSER_VERSION.generic;
+  return [
+    {
+      provider,
+      label: `ZIP · ${file.name}`,
+      filename: file.name,
+      mime: file.type || "application/zip",
+      conversations,
+      warnings: warnings.length ? warnings : conversations.length ? [] : ["Nothing parsed in this ZIP."],
+      skipped,
+      failed,
+      parser: provider,
+      parserVersion,
+      expectedConversationCount: merged.reduce((n, b) => n + (b.expectedConversationCount ?? b.conversations.length), 0),
+      rawBytes: bytes,
+    },
+  ];
 }
 
 export function parseImportMany(texts: string[], mode: ImportMode): Chat[] {
-  const seen = new Set<string>();
   const out: Chat[] = [];
   for (const text of texts) {
-    for (const chat of parseImport(text, mode)) {
-      const key = `${chat.title}::${chat.messages[0]?.content.slice(0, 80) ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(chat);
-      if (out.length >= 10_000) return out;
-    }
+    out.push(...parseImport(text, mode));
   }
   return out;
 }
@@ -61,32 +96,46 @@ export function parseImportMany(texts: string[], mode: ImportMode): Chat[] {
 export async function parseFilesToBundles(files: File[], mode: ImportMode): Promise<ImportBundle[]> {
   const bundles: ImportBundle[] = [];
   for (const file of files) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
     if (isSqlite(file)) {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await replaceSqlite(bytes);
+      const stats = await peekSqliteBytes(bytes, file.name);
       bundles.push({
         provider: "sift",
         label: `Sift archive · ${file.name}`,
         filename: file.name,
+        mime: "application/x-sqlite3",
         conversations: [],
-        warnings: ["Replaced the local SQLite archive with this file. Conversations were not copied twice."],
+        warnings: [
+          "This is a restore, not an import. It will replace the current archive after you confirm. Merge is not implemented.",
+        ],
+        skipped: [],
+        failed: [],
+        parser: "sift",
+        parserVersion: PARSER_VERSION.sift,
+        restore: { ...stats, bytes },
       });
       continue;
     }
-    const parts = isZip(file) ? await textsFromZip(file) : [{ text: await file.text(), filename: file.name }];
-    for (const part of parts) {
-      if (mode === "titles" || mode === "transcripts") {
-        const chats = parseImport(part.text, mode);
-        bundles.push({
-          provider: "generic",
-          label: part.filename,
-          filename: part.filename,
-          conversations: chatsToCanonical(chats, "pending", "generic"),
-          warnings: chats.length ? [] : ["Nothing parsed in this file."],
-        });
-      } else {
-        bundles.push(parseWithAdapters(part.text, part.filename));
-      }
+    if (isZip(file)) {
+      bundles.push(...(await bundlesFromZip(file, bytes, mode)));
+      continue;
+    }
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    if (mode === "titles" || mode === "transcripts") {
+      const bundle = bundleFromText(text, {
+        provider: "generic",
+        label: file.name,
+        filename: file.name,
+        mode,
+        mime: file.type || "text/plain",
+      });
+      bundle.rawBytes = bytes;
+      bundles.push(bundle);
+    } else {
+      const bundle = parseWithAdapters(text, file.name);
+      bundle.rawBytes = bytes;
+      bundle.mime = file.type || bundle.mime || "application/json";
+      bundles.push(bundle);
     }
   }
   return bundles;

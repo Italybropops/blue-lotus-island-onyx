@@ -8,17 +8,24 @@ import type { AiAnalysis, Analysis, Category, Chat, CleanupTab, TriageBucket } f
 import type { ImportBundle } from "@/lib/sift/types";
 import { chatsToCanonical } from "@/lib/sift/providers/canonical";
 import { addRelationship, insertImport, setSetting, updateConversation } from "@/lib/sift/repo";
-import { persistNow } from "@/lib/sift/sqlite";
+import { persistNow, restoreArchiveFromBytes, snapshotBackup } from "@/lib/sift/sqlite";
+import { validateArchive } from "@/lib/sift/validate";
 import { loadVisibleLibrary, openArchive } from "@/lib/sift/hydrate";
 import { statusToState } from "@/lib/sift/view";
+import type { ArchivePeek } from "@/lib/sift/types";
 
 export type AppView = "library" | "insights" | "cleanup" | "import" | "settings";
 
 export interface ImportReport {
   inserted: number;
   exactDuplicates: number;
+  skipped: number;
+  failed: number;
   warnings: string[];
   replacedArchive: boolean;
+  rawRetained: boolean;
+  persistOk: boolean;
+  persistError?: string;
 }
 
 interface ChatState {
@@ -37,6 +44,8 @@ interface ChatState {
   hydrated: boolean;
   archiveError: string | null;
   lastImport: ImportReport | null;
+  persistError: string | null;
+  pendingRestore: (ArchivePeek & { bytes: Uint8Array }) | null;
   setHydrated: (v: boolean) => void;
   setView: (view: AppView) => void;
   setQuery: (query: string) => void;
@@ -48,6 +57,8 @@ interface ChatState {
   reloadFromArchive: () => Promise<void>;
   importChats: (incoming: Chat[], mode: "append" | "replace") => void;
   importBundles: (bundles: ImportBundle[], mode: "append" | "replace") => Promise<ImportReport>;
+  confirmRestore: () => Promise<ImportReport>;
+  cancelRestore: () => void;
   loadDemo: () => void;
   clearLibrary: () => void;
   removeChats: (ids: string[]) => void;
@@ -109,6 +120,8 @@ export const useChatStore = create<ChatState>()(
       hydrated: false,
       archiveError: null,
       lastImport: null,
+      persistError: null,
+      pendingRestore: null,
       setHydrated: (v) => set({ hydrated: v }),
       setView: (view) => set({ view }),
       setQuery: (query) => set({ query }),
@@ -134,33 +147,78 @@ export const useChatStore = create<ChatState>()(
               label: "Pasted text",
               conversations: chatsToCanonical(incoming, "pending", "generic"),
               warnings: [],
+              skipped: [],
+              failed: [],
+              parser: "generic",
+              parserVersion: "generic@2",
             },
           ],
           mode,
         );
       },
       importBundles: async (bundles, mode) => {
-        const replacedArchive = bundles.some((b) => b.provider === "sift" && b.warnings.some((w) => /Replaced the local SQLite/.test(w)));
-        if (!replacedArchive) {
-          if (mode === "replace" && !get().usingDemo) {
-            for (const chat of get().chats.filter((c) => c.status === "active")) {
-              await updateConversation(chat.id, { state: "archived" });
-            }
+        const restore = bundles.find((b) => b.restore);
+        if (restore?.restore) {
+          set({ pendingRestore: restore.restore });
+          return {
+            inserted: 0,
+            exactDuplicates: 0,
+            skipped: 0,
+            failed: 0,
+            warnings: restore.warnings,
+            replacedArchive: false,
+            rawRetained: false,
+            persistOk: true,
+          };
+        }
+        if (mode === "replace" && !get().usingDemo) {
+          for (const chat of get().chats.filter((c) => c.status === "active")) {
+            await updateConversation(chat.id, { state: "archived" });
           }
-          await setSetting("usingDemo", false);
-          let inserted = 0;
-          let exactDuplicates = 0;
-          const warnings: string[] = [];
-          for (const bundle of bundles) {
-            warnings.push(...bundle.warnings);
-            if (!bundle.conversations.length) continue;
-            const result = await insertImport(bundle);
-            inserted += result.inserted;
-            exactDuplicates += result.exactDuplicateLinks;
+        }
+        await setSetting("usingDemo", false);
+        let inserted = 0;
+        let exactDuplicates = 0;
+        let skipped = 0;
+        let failed = 0;
+        let rawRetained = true;
+        let persistOk = true;
+        let persistError: string | undefined;
+        const warnings: string[] = [];
+        for (const bundle of bundles) {
+          warnings.push(...bundle.warnings);
+          skipped += bundle.skipped?.length ?? 0;
+          failed += bundle.failed?.length ?? 0;
+          if (!bundle.conversations.length && !bundle.skipped?.length) continue;
+          const result = await insertImport(bundle);
+          inserted += result.inserted;
+          exactDuplicates += result.exactDuplicateLinks;
+          skipped += result.skipped;
+          failed += result.failed;
+          if (!result.rawRetained) rawRetained = false;
+          if (!result.persistOk) {
+            persistOk = false;
+            persistError = result.persistError;
           }
-          await persistNow();
-          const loaded = await loadVisibleLibrary();
-          const report: ImportReport = { inserted, exactDuplicates, warnings, replacedArchive: false };
+          if (!result.validationOk) warnings.push("Integrity check found issues after this import.");
+        }
+        const saved = await persistNow();
+        if (!saved.ok) {
+          persistOk = false;
+          persistError = saved.error;
+        }
+        const loaded = await loadVisibleLibrary();
+        const report: ImportReport = {
+          inserted,
+          exactDuplicates,
+          skipped,
+          failed,
+          warnings,
+          replacedArchive: false,
+          rawRetained,
+          persistOk,
+          persistError,
+        };
         set({
           ...withAnalysis(loaded.chats),
           usingDemo: false,
@@ -169,18 +227,36 @@ export const useChatStore = create<ChatState>()(
           aiAnalysis: null,
           triage: mode === "replace" ? {} : get().triage,
           lastImport: report,
-          archiveError: null,
+          archiveError: persistOk ? null : persistError ?? "Archive did not save.",
+          persistError: persistOk ? null : persistError ?? "Archive did not save.",
         });
-          return report;
+        return report;
+      },
+      cancelRestore: () => set({ pendingRestore: null }),
+      confirmRestore: async () => {
+        const pending = get().pendingRestore;
+        if (!pending) {
+          throw new Error("Nothing to restore.");
+        }
+        await snapshotBackup();
+        const { backupStamp } = await restoreArchiveFromBytes(pending.bytes);
+        const validation = await validateArchive();
+        if (!validation.ok) {
+          throw new Error(
+            `Restored file failed integrity checks (${validation.issues.map((i) => i.code).join(", ")}). ${backupStamp ? "A backup snapshot was kept in this browser." : ""}`,
+          );
         }
         await setSetting("usingDemo", false);
-        await persistNow();
         const loaded = await loadVisibleLibrary();
         const report: ImportReport = {
           inserted: loaded.chats.length,
           exactDuplicates: 0,
-          warnings: bundles.flatMap((b) => b.warnings),
+          skipped: 0,
+          failed: 0,
+          warnings: [`Restored ${pending.filename}. Previous archive snapshot: ${backupStamp ?? "none"}. Merge is not implemented.`],
           replacedArchive: true,
+          rawRetained: true,
+          persistOk: true,
         };
         set({
           ...withAnalysis(loaded.chats),
@@ -188,6 +264,9 @@ export const useChatStore = create<ChatState>()(
           selectedId: loaded.chats[0]?.id ?? null,
           view: "insights",
           lastImport: report,
+          pendingRestore: null,
+          archiveError: null,
+          persistError: null,
         });
         return report;
       },
@@ -201,6 +280,10 @@ export const useChatStore = create<ChatState>()(
               label: "Sample library",
               conversations: chatsToCanonical(DEMO_CHATS, "pending", "demo"),
               warnings: [],
+              skipped: [],
+              failed: [],
+              parser: "demo",
+              parserVersion: "demo@1",
             });
             await persistNow();
             const again = await loadVisibleLibrary();
@@ -270,7 +353,7 @@ export const useChatStore = create<ChatState>()(
         const setIds = new Set(ids);
         const sources = get()
           .chats.filter((c) => setIds.has(c.id) && c.status === "active")
-          .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+          .sort((a, b) => new Date(a.createdAt || a.importedAt || 0).getTime() - new Date(b.createdAt || b.importedAt || 0).getTime());
         if (sources.length < 2) return;
         const messages = sources.flatMap((c) => c.messages);
         const merged: Chat = {
@@ -306,6 +389,10 @@ export const useChatStore = create<ChatState>()(
             label: "Merged conversation",
             conversations: chatsToCanonical([merged], "pending", "sift"),
             warnings: [],
+            skipped: [],
+            failed: [],
+            parser: "sift",
+            parserVersion: "sift@1",
           });
           await persistNow();
         })();

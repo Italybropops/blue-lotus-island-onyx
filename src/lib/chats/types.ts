@@ -17,19 +17,34 @@ export type ChatStatus = "active" | "removed" | "merged";
 export type ChatSource = "demo" | "import" | "merged";
 export type TriageBucket = "keep" | "park" | "drop";
 
-export type Role = "user" | "assistant";
+export type Role = "user" | "assistant" | "system" | "tool";
+
+export interface MessageAttachment {
+  id: string;
+  filename?: string;
+  mime?: string;
+  availability: "local" | "reference" | "unavailable" | "unsupported";
+  url?: string;
+  bytesLen?: number;
+}
 
 export interface Message {
   id: string;
   role: Role;
   content: string;
+  timestamp?: string;
+  sourceMessageId?: string;
+  parentSourceId?: string;
+  onCurrentPath?: boolean;
+  attachments?: MessageAttachment[];
 }
 
 export interface Chat {
   id: string;
   title: string;
-  createdAt: string;
-  updatedAt: string;
+  createdAt?: string;
+  updatedAt?: string;
+  importedAt?: string;
   messages: Message[];
   source: ChatSource;
   status: ChatStatus;
@@ -41,6 +56,10 @@ export interface Chat {
   contentSha256?: string;
   provider?: string;
   sourceId?: string;
+  sourceConversationId?: string;
+  parser?: string;
+  parserVersion?: string;
+  currentSourceNodeId?: string;
 }
 
 export interface DuplicateGroup {

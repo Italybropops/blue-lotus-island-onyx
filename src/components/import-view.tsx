@@ -18,10 +18,13 @@ const MODES: { id: ImportMode; label: string; hint: string }[] = [
 
 export function ImportView() {
   const importBundles = useChatStore((s) => s.importBundles);
+  const confirmRestore = useChatStore((s) => s.confirmRestore);
+  const cancelRestore = useChatStore((s) => s.cancelRestore);
+  const pendingRestore = useChatStore((s) => s.pendingRestore);
+  const chats = useChatStore((s) => s.chats);
   const loadDemo = useChatStore((s) => s.loadDemo);
   const clearLibrary = useChatStore((s) => s.clearLibrary);
   const usingDemo = useChatStore((s) => s.usingDemo);
-  const chats = useChatStore((s) => s.chats);
   const lastImport = useChatStore((s) => s.lastImport);
   const [text, setText] = useState("");
   const [drag, setDrag] = useState(false);
@@ -40,8 +43,12 @@ export function ImportView() {
       const report = await importBundles([bundle], write);
       setText("");
       toast.success(
-        `Imported ${report.inserted} chats as ${bundle.provider}${report.exactDuplicates ? ` · ${report.exactDuplicates} exact duplicates linked` : ""}.`,
+        `Imported ${report.inserted} chats as ${bundle.provider}` +
+          (report.skipped ? ` · ${report.skipped} skipped` : "") +
+          (report.exactDuplicates ? ` · ${report.exactDuplicates} exact duplicates linked` : "") +
+          (report.rawRetained ? "" : " · original paste kept if the blob store allowed it"),
       );
+      if (!report.persistOk) toast.error(report.persistError ?? "Archive did not save.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Import failed.");
     } finally {
@@ -54,19 +61,26 @@ export function ImportView() {
     setBusy(true);
     try {
       const bundles = await parseFilesToBundles([...files], mode);
+      const restore = bundles.find((b) => b.restore);
+      if (restore) {
+        await importBundles(bundles, write);
+        return;
+      }
       const count = bundles.reduce((n, b) => n + b.conversations.length, 0);
-      const sqliteSwap = bundles.some((b) => b.provider === "sift");
-      if (!count && !sqliteSwap) {
+      if (!count && !bundles.some((b) => (b.skipped?.length ?? 0) > 0)) {
         toast.error("No chats in those files. Use an export ZIP/JSON, a Sift .sqlite, or a title list.");
         return;
       }
       const report = await importBundles(bundles, write);
       const provider = [...new Set(bundles.map((b) => b.provider))].join(", ");
       toast.success(
-        report.replacedArchive
-          ? "Restored the SQLite archive from file."
-          : `Imported ${report.inserted} chats (${provider})${report.exactDuplicates ? ` · ${report.exactDuplicates} exact duplicates linked` : ""}.`,
+        `Imported ${report.inserted} chats (${provider})` +
+          (report.skipped ? ` · ${report.skipped} skipped` : "") +
+          (report.failed ? ` · ${report.failed} failed` : "") +
+          (report.exactDuplicates ? ` · ${report.exactDuplicates} exact duplicates linked` : "") +
+          (report.rawRetained ? "" : " · original file could not be kept in this browser"),
       );
+      if (!report.persistOk) toast.error(report.persistError ?? "Archive did not save.");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn’t read those files.");
     } finally {
@@ -97,15 +111,58 @@ export function ImportView() {
       <header>
         <h1 className="font-display text-4xl leading-tight tracking-tight">Bring chats in</h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          Adapters read Grok, ChatGPT, and Claude exports into one internal format. Raw files are not rewritten.
-          Everything lands in the local SQLite archive on this device.
+          Adapters read Grok, ChatGPT, Claude, and Perplexity exports. Original files are kept in this browser’s blob store
+          (OPFS or IndexedDB) so they can be re-parsed later. Gemini is not supported yet. A Perplexity file is never
+          relabeled as Grok.
         </p>
       </header>
 
+      {pendingRestore && (
+        <section className="rounded-xl border border-destructive/40 bg-card p-5">
+          <h2 className="font-display text-2xl">Replace current archive?</h2>
+          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+            Restore replaces the archive in this browser. It does not merge. A snapshot of the current archive is saved
+            first when possible.
+          </p>
+          <ul className="mt-3 space-y-1 text-sm">
+            <li>Current library: {chats.length} conversations in this tab</li>
+            <li>
+              Incoming file: {pendingRestore.filename} · {pendingRestore.conversations} conversations ·{" "}
+              {pendingRestore.messages} messages · schema {pendingRestore.schemaVersion}
+            </li>
+          </ul>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              onClick={() => {
+                void (async () => {
+                  setBusy(true);
+                  try {
+                    const report = await confirmRestore();
+                    toast.success(report.warnings[0] ?? "Archive restored.");
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Restore failed.");
+                  } finally {
+                    setBusy(false);
+                  }
+                })();
+              }}
+              disabled={busy}
+            >
+              Replace archive
+            </Button>
+            <Button variant="outline" onClick={() => cancelRestore()} disabled={busy}>
+              Cancel
+            </Button>
+          </div>
+        </section>
+      )}
+
       {lastImport && (
         <p className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
-          Last import: {lastImport.inserted} conversations
-          {lastImport.exactDuplicates ? ` · ${lastImport.exactDuplicates} exact-duplicate links` : ""}.
+          Last import: {lastImport.inserted} conversations · {lastImport.skipped} skipped · {lastImport.failed} failed
+          {lastImport.exactDuplicates ? ` · ${lastImport.exactDuplicates} exact-duplicate links` : ""}
+          {lastImport.rawRetained ? " · original retained" : " · original not retained"}
+          {lastImport.persistOk ? "" : ` · SAVE FAILED: ${lastImport.persistError ?? ""}`}
           {lastImport.warnings[0] ? ` ${lastImport.warnings[0]}` : ""}
         </p>
       )}
@@ -126,11 +183,17 @@ export function ImportView() {
             with chat_messages).
           </li>
           <li>
+            <span className="font-medium text-foreground">Perplexity.</span> Export my data, then drop the{" "}
+            <span className="text-foreground">conversations-….json</span> file. Threads stay Perplexity. They are not
+            filed as Grok.
+          </li>
+          <li>
             <span className="font-medium text-foreground">Sift backup.</span> Drop a previously downloaded{" "}
-            <span className="text-foreground">.sqlite</span> to restore this archive.
+            <span className="text-foreground">.sqlite</span> to restore this archive. Restore is a full replace and
+            asks for confirmation. Merge of two archives is not implemented.
           </li>
         </ul>
-        <p className="mt-3 text-xs text-subtle">Up to 10,000 conversations per import. Full message text is kept.</p>
+        <p className="mt-3 text-xs text-subtle">No conversation cap. Full message text is kept. Original files are stored separately from SQLite.</p>
       </section>
 
       <section className="rounded-xl border border-border p-5">

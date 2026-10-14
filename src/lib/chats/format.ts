@@ -1,7 +1,8 @@
 import { format, formatDistanceToNowStrict, parseISO } from "date-fns";
 import type { Analysis, Chat } from "./types";
 
-export function relDate(iso: string): string {
+export function relDate(iso?: string): string {
+  if (!iso) return "";
   try {
     return formatDistanceToNowStrict(parseISO(iso), { addSuffix: true });
   } catch {
@@ -9,7 +10,8 @@ export function relDate(iso: string): string {
   }
 }
 
-export function absDate(iso: string): string {
+export function absDate(iso?: string): string {
+  if (!iso) return "";
   try {
     return format(parseISO(iso), "d MMM yyyy");
   } catch {

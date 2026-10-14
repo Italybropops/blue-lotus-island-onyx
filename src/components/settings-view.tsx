@@ -17,7 +17,9 @@ export function SettingsView() {
     conversations: number;
     messages: number;
     sources: number;
+    attachments: number;
     exactDuplicates: number;
+    rawRetained: number;
     schemaVersion: string;
   } | null>(null);
   const [sources, setSources] = useState<SourceRecord[]>([]);
@@ -74,12 +76,12 @@ export function SettingsView() {
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-8 px-4 py-6 lg:px-8">
       <header>
-        <p className="text-xs tracking-wide text-muted-foreground uppercase">Stage 1 foundation</p>
+        <p className="text-xs tracking-wide text-muted-foreground uppercase">Stage 1.5 archive integrity</p>
         <h1 className="font-display mt-2 text-4xl leading-tight tracking-tight">Archive, on this device</h1>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          Sift is becoming a local knowledge system. This slice puts conversations in a SQLite database in{" "}
-          <em>this browser</em>, stops erasing chats, and treats Grok as an optional off-device helper — not the
-          engine.
+          The live store is SQLite compiled to WebAssembly in this tab, with a snapshot in IndexedDB. That is not a
+          Mac folder. Download a .sqlite backup if you want a file you can keep. Original exports live in a separate
+          blob store (OPFS or IndexedDB), not as giant SQLite blobs.
         </p>
       </header>
 
@@ -94,30 +96,28 @@ export function SettingsView() {
         <Stat label="Messages" value={stats?.messages ?? "—"} />
         <Stat label="Sources" value={stats?.sources ?? "—"} />
         <Stat label="Exact dupes" value={stats?.exactDuplicates ?? "—"} />
+        <Stat label="Attachments" value={stats?.attachments ?? "—"} />
+        <Stat label="Raw retained" value={stats?.rawRetained ?? "—"} />
       </section>
 
       <section className="rounded-xl border border-border bg-card p-5">
-        <h2 className="font-display text-2xl">What changed</h2>
+        <h2 className="font-display text-2xl">What this archive actually is</h2>
         <ul className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
           <li>
-            <span className="text-foreground">SQLite is the store.</span> Not a giant browser note. You can download
-            the <span className="text-foreground">.sqlite</span> file and keep it on your Mac.
+            <span className="text-foreground">Download SQLite</span> is a backup snapshot of structured data, not the
+            live Mac database. Restore on Import is a full replace and asks first.
           </li>
           <li>
-            <span className="text-foreground">Nothing is erased by default.</span> Hide, park, or merge — the original
-            rows stay. Relationships record why.
+            <span className="text-foreground">JSON download</span> is a lossy view for reading — it is not a restore
+            format. Use SQLite for recovery.
           </li>
           <li>
-            <span className="text-foreground">Exact duplicates use SHA-256</span> of normalized messages. That does
-            not need an AI model.
+            <span className="text-foreground">Original exports</span> are stored beside SQLite in this browser when the
+            blob store allows it. Clearing site data still wipes both.
           </li>
           <li>
-            <span className="text-foreground">Imports keep full text.</span> Long chats are no longer cut off at 12,000
-            characters.
-          </li>
-          <li>
-            <span className="text-foreground">Grok / xAI is optional and off-device.</span> Local sorting still runs
-            with no network. Confirm before any transcript leaves this machine.
+            <span className="text-foreground">Hide, park, merge</span> never delete rows. Exact duplicates are linked,
+            not collapsed.
           </li>
         </ul>
       </section>
@@ -135,7 +135,10 @@ export function SettingsView() {
             Download JSON
           </Button>
         </div>
-        <p className="mt-3 text-xs text-subtle">Schema version {stats?.schemaVersion ?? "—"}. Drop a .sqlite file on Import to restore it.</p>
+        <p className="mt-3 text-xs text-subtle">
+          Schema {stats?.schemaVersion ?? "—"}. Drop a .sqlite on Import to restore (replace, with confirmation). Merge
+          of two archives is not implemented.
+        </p>
       </section>
 
       <section className="rounded-xl border border-border p-5">
@@ -167,7 +170,11 @@ export function SettingsView() {
               <li key={s.id} className="flex flex-wrap items-baseline justify-between gap-2 py-3">
                 <div>
                   <p className="text-sm font-medium">{s.label}</p>
-                  <p className="text-xs text-muted-foreground">{s.notes || s.rawFilename || s.provider}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {s.parserVersion || s.parser} · {s.conversationCount} chats
+                    {s.rawRetained ? " · original kept" : " · original not kept"}
+                    {s.rawSha256 ? ` · ${s.rawSha256.slice(0, 12)}…` : ""}
+                  </p>
                 </div>
                 <Badge variant="outline">{s.provider}</Badge>
               </li>
@@ -188,8 +195,9 @@ export function SettingsView() {
       <section className="rounded-xl border border-border p-5">
         <h2 className="font-display text-2xl">What is not built yet</h2>
         <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-          Embeddings, knowledge extraction (facts, preferences, decisions), Ollama/MLX, Gemini/Perplexity importers,
-          and resume-able processing jobs. The tables exist so those can be added without throwing this archive away.
+          Embeddings, knowledge extraction (facts, preferences, decisions), Ollama/MLX, a Gemini importer,
+          and resume-able processing jobs. Perplexity’s official conversations export is imported. The tables exist so
+          later stages can be added without throwing this archive away.
         </p>
       </section>
     </div>

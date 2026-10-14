@@ -82,7 +82,7 @@ function AskExternalAiButton() {
         id: c.id,
         title: c.title,
         category: c.category,
-        createdAt: c.createdAt,
+        createdAt: c.createdAt ?? c.importedAt ?? "",
         messageCount: c.messages.length,
         userChars: userText(c).length,
         firstUser: c.messages.find((m) => m.role === "user")?.content ?? "",

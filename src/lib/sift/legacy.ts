@@ -38,6 +38,10 @@ export async function bootstrapArchive(): Promise<{ usingDemo: boolean }> {
         label: legacy.usingDemo ? "Migrated demo library" : "Migrated browser library",
         conversations: chatsToCanonical(legacy.chats, sourceId, provider),
         warnings: ["Imported from the previous localStorage prototype. Original copy kept as a backup in this browser."],
+        skipped: [],
+        failed: [],
+        parser: provider,
+        parserVersion: provider === "demo" ? "demo@1" : "generic@legacy",
       });
       try {
         const raw = localStorage.getItem(LEGACY_KEY);
@@ -57,6 +61,10 @@ export async function bootstrapArchive(): Promise<{ usingDemo: boolean }> {
       label: "Sample library",
       conversations: chatsToCanonical(DEMO_CHATS, sourceId, "demo"),
       warnings: [],
+      skipped: [],
+      failed: [],
+      parser: "demo",
+      parserVersion: "demo@1",
     });
     await setSetting("usingDemo", true);
     return { usingDemo: true };

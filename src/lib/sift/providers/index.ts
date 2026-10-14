@@ -1,10 +1,11 @@
 import { chatgptAdapter } from "./chatgpt";
 import { claudeAdapter } from "./claude";
 import { genericAdapter, grokAdapter } from "./generic";
+import { perplexityAdapter } from "./perplexity";
 import type { ProviderAdapter } from "./types";
 import type { ImportBundle, ProviderId } from "../types";
 
-const ADAPTERS: ProviderAdapter[] = [chatgptAdapter, claudeAdapter, grokAdapter];
+const ADAPTERS: ProviderAdapter[] = [perplexityAdapter, chatgptAdapter, claudeAdapter, grokAdapter];
 
 export function detectProvider(raw: string, filename?: string): ProviderAdapter {
   for (const adapter of ADAPTERS) {
@@ -22,5 +23,5 @@ export function parseForced(provider: ProviderId, raw: string, filename?: string
   return adapter.parse(raw, filename);
 }
 
-export { chatgptAdapter, claudeAdapter, grokAdapter, genericAdapter };
+export { chatgptAdapter, claudeAdapter, grokAdapter, genericAdapter, perplexityAdapter };
 export type { ProviderAdapter };
