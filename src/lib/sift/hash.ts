@@ -9,6 +9,10 @@ export function messageHashInput(role: string, content: string): string {
   return `${role}\n${normalizeText(content)}`;
 }
 
+/**
+ * Exact-duplicate input: role + normalized content of every message, in sort order.
+ * Title, timestamps, ids, provider, and attachments are excluded.
+ */
 export function conversationHashInput(
   messages: Pick<CanonicalMessage, "role" | "content">[],
 ): string {
@@ -16,13 +20,18 @@ export function conversationHashInput(
 }
 
 export async function sha256Hex(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text);
+  return sha256Bytes(new TextEncoder().encode(text));
+}
+
+export async function sha256Bytes(bytes: Uint8Array): Promise<string> {
   if (globalThis.crypto?.subtle) {
-    const buf = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    const buf = await globalThis.crypto.subtle.digest("SHA-256", copy);
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
   const { createHash } = await import("node:crypto");
-  return createHash("sha256").update(text).digest("hex");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export async function hashMessages(

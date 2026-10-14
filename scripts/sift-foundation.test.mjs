@@ -80,16 +80,14 @@ test("sqlite schema stores full message content and duplicate links", async () =
   db.exec(schema);
   const long = "Q".repeat(20_000);
   const hash = sha256Hex(`user\n${long}`);
-  db.run(`INSERT INTO sources (id, provider, label, imported_at) VALUES (?, ?, ?, ?)`, [
-    "src1",
-    "chatgpt",
-    "fixture",
-    new Date().toISOString(),
-  ]);
   db.run(
-    `INSERT INTO conversations (id, source_id, title, content_sha256, processing_stage, message_count, char_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ["c1", "src1", "Long", hash, "hashed", 1, long.length],
+    `INSERT INTO sources (id, provider, label, imported_at, parser, parser_version) VALUES (?, ?, ?, ?, ?, ?)`,
+    ["src1", "chatgpt", "fixture", new Date().toISOString(), "chatgpt", "chatgpt@2"],
+  );
+  db.run(
+    `INSERT INTO conversations (id, source_id, title, imported_at, content_sha256, processing_stage, message_count, char_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ["c1", "src1", "Long", new Date().toISOString(), hash, "hashed", 1, long.length],
   );
   db.run(`INSERT INTO messages (id, conversation_id, role, content, sort_index, content_sha256) VALUES (?, ?, ?, ?, ?, ?)`, [
     "m1",
@@ -100,9 +98,9 @@ test("sqlite schema stores full message content and duplicate links", async () =
     hash,
   ]);
   db.run(
-    `INSERT INTO conversations (id, source_id, title, content_sha256, processing_stage, message_count, char_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ["c2", "src1", "Long copy", hash, "hashed", 1, long.length],
+    `INSERT INTO conversations (id, source_id, title, imported_at, content_sha256, processing_stage, message_count, char_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ["c2", "src1", "Long copy", new Date().toISOString(), hash, "hashed", 1, long.length],
   );
   db.run(
     `INSERT INTO relationships (id, kind, from_id, to_id, score, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -126,16 +124,15 @@ test("reused message ids collide unless the importer mints a new primary key", a
   const SQL = await initSqlJs({ wasmBinary });
   const db = new SQL.Database();
   db.exec(schema);
-  db.run(`INSERT INTO sources (id, provider, label, imported_at) VALUES (?, ?, ?, ?)`, [
-    "src1",
-    "demo",
-    "fixture",
-    new Date().toISOString(),
-  ]);
-  db.run(`INSERT INTO conversations (id, source_id, title, content_sha256, processing_stage) VALUES (?, ?, ?, ?, ?)`, [
+  db.run(
+    `INSERT INTO sources (id, provider, label, imported_at, parser, parser_version) VALUES (?, ?, ?, ?, ?, ?)`,
+    ["src1", "demo", "fixture", new Date().toISOString(), "demo", "demo@1"],
+  );
+  db.run(`INSERT INTO conversations (id, source_id, title, imported_at, content_sha256, processing_stage) VALUES (?, ?, ?, ?, ?, ?)`, [
     "c1",
     "src1",
     "A",
+    new Date().toISOString(),
     "h1",
     "hashed",
   ]);
@@ -147,10 +144,11 @@ test("reused message ids collide unless the importer mints a new primary key", a
     0,
     "x",
   ]);
-  db.run(`INSERT INTO conversations (id, source_id, title, content_sha256, processing_stage) VALUES (?, ?, ?, ?, ?)`, [
+  db.run(`INSERT INTO conversations (id, source_id, title, imported_at, content_sha256, processing_stage) VALUES (?, ?, ?, ?, ?, ?)`, [
     "c2",
     "src1",
     "B",
+    new Date().toISOString(),
     "h2",
     "hashed",
   ]);

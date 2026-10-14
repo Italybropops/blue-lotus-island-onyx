@@ -1,6 +1,7 @@
 import { FolderOpen, Layers, Library, Settings, Upload } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { activeChats, useChatStore, type AppView } from "@/lib/chats/store";
+import { subscribePersistError } from "@/lib/sift/sqlite";
 import { cn } from "@/lib/utils";
 
 const NAV: { id: AppView; label: string; icon: typeof Library }[] = [
@@ -42,8 +43,12 @@ export function AppShell({
   const usingDemo = useChatStore((s) => s.usingDemo);
   const chats = useChatStore((s) => s.chats);
   const analysis = useChatStore((s) => s.analysis);
+  const persistError = useChatStore((s) => s.persistError);
+  const setPersistError = (err: string | null) => useChatStore.setState({ persistError: err, archiveError: err });
   const deleteCount = analysis?.deleteSuggestions.length ?? 0;
   const activeCount = activeChats(chats).length;
+
+  useEffect(() => subscribePersistError(setPersistError), []);
 
   return (
     <div className="flex min-h-dvh flex-col overflow-x-hidden bg-background text-foreground lg:flex-row">
@@ -75,12 +80,17 @@ export function AppShell({
           })}
         </nav>
         <p className="mt-auto pt-8 text-xs leading-relaxed text-subtle">
-          Conversations live in a SQLite archive in this browser. Hide and merge are reversible. Sift cannot delete
-          chats on grok.com.
+          Conversations live in a SQLite archive in this browser (not a Mac folder). Hide and merge are reversible.
+          Sift cannot delete chats on grok.com.
         </p>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
+        {persistError && (
+          <p className="border-b border-destructive/40 bg-card px-4 py-2 text-sm text-destructive lg:px-8">
+            Archive did not save in this browser: {persistError}. Changes may be lost if you close the tab.
+          </p>
+        )}
         <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 lg:px-8">
           <div className="lg:hidden">
             <Wordmark />

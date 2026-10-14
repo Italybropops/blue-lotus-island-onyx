@@ -10,6 +10,7 @@ import { summarizeChat } from "@/lib/ai/deep-analyze";
 import { flagsFor, msgLabel, relDate } from "@/lib/chats/format";
 import { activeChats, useChatStore } from "@/lib/chats/store";
 import { CATEGORIES, type Category, type Chat } from "@/lib/chats/types";
+import { transcriptMessages } from "@/lib/sift/view";
 import { cn } from "@/lib/utils";
 
 function flagBadge(flag: string) {
@@ -55,7 +56,7 @@ export function LibraryView() {
           .toLowerCase()
           .includes(q);
       })
-      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || +new Date(b.updatedAt) - +new Date(a.updatedAt));
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || +new Date(b.updatedAt || b.importedAt || 0) - +new Date(a.updatedAt || a.importedAt || 0));
   }, [active, analysis, categoryFilter, flagFilter, query]);
 
   return (
@@ -139,7 +140,7 @@ export function LibraryView() {
                   >
                     <div className="flex items-start justify-between gap-3">
                       <h3 className="text-sm leading-snug font-medium">{chat.title}</h3>
-                      <span className="shrink-0 text-xs text-subtle tabular-nums">{relDate(chat.updatedAt)}</span>
+                      <span className="shrink-0 text-xs text-subtle tabular-nums">{relDate(chat.updatedAt || chat.importedAt)}</span>
                     </div>
                     <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{chat.summary}</p>
                     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
@@ -222,8 +223,13 @@ function ChatDetail({ chat, onClose }: { chat: Chat; onClose: () => void }) {
     <div className="flex h-full flex-col">
       <div className="flex items-start justify-between gap-3 px-5 py-4">
         <div className="min-w-0">
-          <p className="text-xs text-muted-foreground">{relDate(chat.updatedAt)}</p>
+          <p className="text-xs text-muted-foreground">{relDate(chat.updatedAt || chat.createdAt || chat.importedAt)}</p>
           <h2 className="font-display mt-1 text-2xl leading-snug">{chat.title}</h2>
+          <p className="mt-1 text-xs text-subtle">
+            {chat.parserVersion || chat.provider || "unknown parser"}
+            {chat.sourceConversationId ? ` · source ${chat.sourceConversationId}` : ""}
+            {chat.createdAt ? ` · ${chat.createdAt.slice(0, 10)}` : " · original date unknown"}
+          </p>
         </div>
         <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close chat" className="shrink-0">
           <X className="size-4" />
@@ -283,12 +289,30 @@ function ChatDetail({ chat, onClose }: { chat: Chat; onClose: () => void }) {
       <Separator className="mt-4" />
       <ScrollArea className="flex-1">
         <div className="space-y-4 px-5 py-5">
-          {chat.messages.map((m) => (
+          {chat.messages.some((m) => m.onCurrentPath === false) && (
+            <p className="text-xs text-muted-foreground">
+              Showing the selected branch. {chat.messages.filter((m) => m.onCurrentPath === false).length} other nodes
+              stay in the archive.
+            </p>
+          )}
+          {transcriptMessages(chat).map((m) => (
             <article key={m.id} className="rounded-lg bg-muted/60 px-4 py-3">
               <p className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                {m.role === "user" ? "You" : "Grok"}
+                {m.role === "user" ? "You" : m.role === "assistant" ? "Assistant" : m.role}
+                {m.timestamp ? ` · ${m.timestamp.slice(0, 16).replace("T", " ")}` : ""}
               </p>
               <p className="mt-1.5 text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
+              {m.attachments?.length ? (
+                <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+                  {m.attachments.map((a) => (
+                    <li key={a.id}>
+                      {a.filename || a.url || "attachment"} · {a.availability}
+                      {a.availability === "reference" ? " (pointer only, bytes not in the export)" : ""}
+                      {a.availability === "unavailable" ? " (not stored locally)" : ""}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </article>
           ))}
         </div>

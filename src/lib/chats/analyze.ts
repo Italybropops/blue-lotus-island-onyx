@@ -134,8 +134,11 @@ export function isClutter(chat: Chat): boolean {
   return false;
 }
 
-function daysAgo(iso: string): number {
-  return (Date.now() - new Date(iso).getTime()) / 86_400_000;
+function daysAgo(iso?: string): number {
+  if (!iso) return 0;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return 0;
+  return (Date.now() - t) / 86_400_000;
 }
 
 function unionFind(pairs: [string, string][]): string[][] {
@@ -363,7 +366,7 @@ export function analyzeChats(chats: Chat[]): Analysis {
     if (clutterIds.includes(c.id)) continue;
     if (deleteSuggestions.some((d) => d.chatId === c.id)) continue;
     if (c.pinned) continue;
-    if (c.messages.length <= 2 && charCount(c) < 220 && daysAgo(c.updatedAt) > 60) {
+    if (c.messages.length <= 2 && charCount(c) < 220 && daysAgo(c.updatedAt || c.createdAt || c.importedAt) > 60) {
       deleteSuggestions.push({
         chatId: c.id,
         reason: "Short and untouched for two months — likely a one-off.",
@@ -377,7 +380,7 @@ export function analyzeChats(chats: Chat[]): Analysis {
   const scored = [...active].sort((a, b) => {
     const pin = Number(b.pinned) - Number(a.pinned);
     if (pin) return pin;
-    return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    return new Date(b.updatedAt || b.importedAt || 0).getTime() - new Date(a.updatedAt || a.importedAt || 0).getTime();
   });
   const workingSetIds = scored
     .filter((c) => !clutterIds.includes(c.id) && !deleteSuggestions.some((d) => d.chatId === c.id && d.severity !== "stale"))

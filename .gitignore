@@ -3,3 +3,5 @@ node_modules/
 .github_repo
 .env
 .env.*
+attachments/
+artifacts/sift-audit.json

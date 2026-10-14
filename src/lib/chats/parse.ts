@@ -88,19 +88,22 @@ function toChat(partial: {
   title?: string;
   createdAt?: string;
   updatedAt?: string;
+  importedAt?: string;
+  sourceConversationId?: string;
   messages: Message[];
   category?: Category;
   source?: Chat["source"];
 }): Chat {
-  const now = new Date().toISOString();
+  const importedAt = partial.importedAt ?? new Date().toISOString();
   const messages = partial.messages.length
     ? partial.messages
     : [{ id: newId("m"), role: "user" as const, content: "" }];
   return {
     id: newId("c"),
     title: partial.title?.trim() || titleFrom(messages[0]?.content ?? ""),
-    createdAt: partial.createdAt ?? now,
-    updatedAt: partial.updatedAt ?? partial.createdAt ?? now,
+    createdAt: partial.createdAt,
+    updatedAt: partial.updatedAt ?? partial.createdAt,
+    importedAt,
     messages,
     source: partial.source ?? "import",
     status: "active",
@@ -108,6 +111,7 @@ function toChat(partial: {
     pinned: false,
     archived: false,
     summary: summaryFrom(messages),
+    sourceConversationId: partial.sourceConversationId,
   };
 }
 
@@ -255,10 +259,19 @@ function messageFromUnknown(m: unknown): Message | null {
   const roleRaw = String(src.role ?? src.sender ?? src.author ?? src.from ?? rec.role ?? "user").toLowerCase();
   if (roleRaw.includes("system") && !roleRaw.includes("assistant")) return null;
   const role: Message["role"] = /assistant|grok|model|bot/.test(roleRaw) && !roleRaw.includes("user") ? "assistant" : "user";
+  const timestamp = mongoDate(src.create_time ?? src.createdAt ?? src.created_at ?? src.timestamp ?? rec.create_time);
+  const sourceMessageId =
+    typeof src.id === "string"
+      ? src.id
+      : typeof src.message_id === "string"
+        ? src.message_id
+        : typeof rec.id === "string"
+          ? rec.id
+          : undefined;
   if (roleRaw === "human" || roleRaw === "you" || roleRaw === "me") {
-    return { id: newId("m"), role: "user", content };
+    return { id: newId("m"), role: "user", content, timestamp, sourceMessageId };
   }
-  return { id: newId("m"), role, content };
+  return { id: newId("m"), role, content, timestamp, sourceMessageId };
 }
 
 function chatFromRecord(row: Record<string, unknown>): Chat | null {
@@ -288,34 +301,61 @@ function chatFromRecord(row: Record<string, unknown>): Chat | null {
     mongoDate(conv.updatedAt ?? conv.updated_at ?? conv.update_time ?? row.updatedAt ?? row.updated_at ?? row.update_time) ??
     createdAt;
 
-  return toChat({ title, createdAt, updatedAt, messages, category: asCategory(conv.category ?? row.category) });
+  const sourceConversationId =
+    (typeof conv.id === "string" && conv.id) ||
+    (typeof row.conversationId === "string" && row.conversationId) ||
+    (typeof row.conversation_id === "string" && row.conversation_id) ||
+    (typeof row.id === "string" && row.id) ||
+    undefined;
+
+  return toChat({
+    title,
+    createdAt,
+    updatedAt,
+    sourceConversationId: sourceConversationId || undefined,
+    messages,
+    category: asCategory(conv.category ?? row.category),
+  });
 }
 
-function parseJsonChats(data: unknown): Chat[] | null {
+export interface ParseDiagnostics {
+  chats: Chat[];
+  skipped: { reason: string; key?: string }[];
+  expected?: number;
+}
+
+function parseJsonChats(data: unknown): ParseDiagnostics | null {
   const out: Chat[] = [];
-  collectChats(data, out, 0);
-  const unique = new Map<string, Chat>();
-  for (const chat of out) {
-    const key = `${chat.title}::${chat.messages.map((m) => m.content.slice(0, 40)).join("|")}`.slice(0, 240);
-    if (!unique.has(key)) unique.set(key, chat);
-  }
-  const chats = [...unique.values()].slice(0, 10_000);
-  return chats.length ? chats : null;
+  const skipped: { reason: string; key?: string }[] = [];
+  collectChats(data, out, skipped, 0);
+  return out.length || skipped.length ? { chats: out, skipped, expected: out.length + skipped.length } : null;
 }
 
-function collectChats(data: unknown, out: Chat[], depth: number): void {
-  if (depth > 8 || out.length >= 500 || data == null) return;
+function collectChats(
+  data: unknown,
+  out: Chat[],
+  skipped: { reason: string; key?: string }[],
+  depth: number,
+): void {
+  if (depth > 16 || data == null) return;
 
   if (Array.isArray(data)) {
-    const mapped = data
-      .map((row) => (row && typeof row === "object" ? chatFromRecord(row as Record<string, unknown>) : null))
-      .filter((c): c is Chat => Boolean(c));
     const objectCount = data.filter((x) => x && typeof x === "object").length;
-    if (mapped.length && mapped.length >= Math.max(1, objectCount * 0.5)) {
-      out.push(...mapped);
-      return;
+    let mapped = 0;
+    for (const row of data) {
+      if (!row || typeof row !== "object") {
+        skipped.push({ reason: "Array item is not an object" });
+        continue;
+      }
+      const chat = chatFromRecord(row as Record<string, unknown>);
+      if (chat) {
+        out.push(chat);
+        mapped += 1;
+      }
     }
-    for (const item of data) collectChats(item, out, depth + 1);
+    if (mapped && mapped >= Math.max(1, objectCount * 0.5)) return;
+    if (mapped) return;
+    for (const item of data) collectChats(item, out, skipped, depth + 1);
     return;
   }
 
@@ -325,7 +365,7 @@ function collectChats(data: unknown, out: Chat[], depth: number): void {
   for (const key of ["conversations", "chats", "threads", "items", "data", "history", "grok_conversations"]) {
     if (rec[key] != null) {
       const before = out.length;
-      collectChats(rec[key], out, depth + 1);
+      collectChats(rec[key], out, skipped, depth + 1);
       if (out.length > before) return;
     }
   }
@@ -338,8 +378,7 @@ function collectChats(data: unknown, out: Chat[], depth: number): void {
 
   for (const [key, value] of Object.entries(rec)) {
     if (key === "account" || key === "user" || key === "profile") continue;
-    if (value && typeof value === "object") collectChats(value, out, depth + 1);
-    if (out.length >= 500) return;
+    if (value && typeof value === "object") collectChats(value, out, skipped, depth + 1);
   }
 }
 
@@ -386,27 +425,31 @@ function parseTranscripts(text: string): Chat[] {
 }
 
 export function parseImport(raw: string, mode: ImportMode = "auto"): Chat[] {
-  const text = raw.replace(/^\uFEFF/, "").trim();
-  if (!text) return [];
+  return parseImportDetailed(raw, mode).chats;
+}
 
-  if (mode === "titles") return parseTitleList(text);
-  if (mode === "transcripts") return parseTranscripts(text);
+export function parseImportDetailed(raw: string, mode: ImportMode = "auto"): ParseDiagnostics {
+  const text = raw.replace(/^\uFEFF/, "").trim();
+  if (!text) return { chats: [], skipped: [] };
+
+  if (mode === "titles") return { chats: parseTitleList(text), skipped: [] };
+  if (mode === "transcripts") return { chats: parseTranscripts(text), skipped: [] };
 
   if (text.startsWith("{") || text.startsWith("[")) {
     try {
       const json = JSON.parse(text) as unknown;
       const fromJson = parseJsonChats(json);
-      if (fromJson?.length) return fromJson;
+      if (fromJson && (fromJson.chats.length || fromJson.skipped.length)) return fromJson;
     } catch {
-      // fall through
+      return { chats: [], skipped: [{ reason: "Invalid JSON" }] };
     }
   }
 
   const jsonl = parseJsonLines(text);
-  if (jsonl.length >= 2) return jsonl;
+  if (jsonl.length >= 2) return { chats: jsonl, skipped: [] };
 
-  if (looksLikeTitleList(text)) return parseTitleList(text);
-  return parseTranscripts(text);
+  if (looksLikeTitleList(text)) return { chats: parseTitleList(text), skipped: [] };
+  return { chats: parseTranscripts(text), skipped: [] };
 }
 
 function parseJsonLines(text: string): Chat[] {
@@ -416,12 +459,12 @@ function parseJsonLines(text: string): Chat[] {
   for (const line of lines) {
     try {
       const parsed = parseJsonChats(JSON.parse(line) as unknown);
-      if (parsed) chats.push(...parsed);
+      if (parsed) chats.push(...parsed.chats);
     } catch {
-      // skip
+      // skip malformed line; caller sees overall parse
     }
   }
-  return chats.slice(0, 10_000);
+  return chats;
 }
 
 export function userText(chat: Chat): string {
